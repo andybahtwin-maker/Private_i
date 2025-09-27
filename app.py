@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, time, threading, io, requests, json
+import os, time, threading, io, requests
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, send_file, render_template_string
 import cv2, numpy as np
@@ -16,7 +16,6 @@ CLASSES = ["background","aeroplane","bicycle","bird","boat","bottle","bus","car"
            "chair","cow","diningtable","dog","horse","motorbike","person","pottedplant",
            "sheep","sofa","train","tvmonitor"]
 
-# Load model (fail fast with nice message)
 if not (os.path.exists(PTX_PATH) and os.path.exists(CAFFEM_PATH)):
     raise SystemExit("[!] Missing model files. Run: ./scripts/fetch_models.sh")
 net = cv2.dnn.readNetFromCaffe(PTX_PATH, CAFFEM_PATH)
@@ -60,6 +59,15 @@ def english_summary(summary: dict) -> str:
         name = "people" if k=="person" and v>1 else ("person" if k=="person" else k)
         parts.append(f"{v} {name}")
     return "I currently see " + ", ".join(parts) + "."
+
+def draw_annotations(frame: np.ndarray, dets):
+    out = frame.copy()
+    for d in dets:
+        x1,y1,x2,y2 = d["box"]
+        label = f'{d["label"]} {d["conf"]:.2f}'
+        cv2.rectangle(out, (x1,y1), (x2,y2), (0,255,0), 2)
+        cv2.putText(out, label, (x1, max(12, y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+    return out
 
 def mjpeg_generator():
     # Try native MJPEG first
@@ -107,7 +115,7 @@ img,video{max-width:100%;border-radius:8px}
 <div class="card"><h2>Live Feed</h2><img id="feed" src="/video" alt="Live video"/>
 <div class="muted">If you see nothing, verify IP Webcam is running & CAMERA_URL in <code>.env</code>.</div></div>
 <div class="card"><h2>AI Summary</h2><div id="summary" class="summary">Loading…</div>
-<div class="muted">Updates every {{interval}}s • <code>/summary.json</code> • snapshot: <a href="/shot.jpg">/shot.jpg</a></div></div>
+<div class="muted">Updates every {{interval}}s • <code>/summary.json</code> • snapshot: <a href="/shot.jpg">/shot.jpg</a> • annotated: <a href="/annotated.jpg">/annotated.jpg</a></div></div>
 </div>
 <script>
 async function refresh(){try{const r=await fetch('/summary.json');const j=await r.json();document.getElementById('summary').textContent=j.english;}catch(e){document.getElementById('summary').textContent='No summary yet.'}}
@@ -118,6 +126,10 @@ setInterval(refresh, {{interval}}*1000);refresh();
 @app.route("/")
 def index():
     return render_template_string(DASHBOARD_HTML, interval=int(ANALYZE_EVERY))
+
+@app.route("/health")
+def health():
+    return jsonify({"ok": True, "camera": CAMERA_URL, "last_update": last_summary["timestamp"]})
 
 @app.route("/summary.json")
 def summary_json():
@@ -136,6 +148,18 @@ def shot_jpg():
         try: frame = grab_frame()
         except Exception: return ("", 204)
     ok, buf = cv2.imencode(".jpg", frame)
+    if not ok: return ("", 204)
+    return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
+
+@app.route("/annotated.jpg")
+def annotated_jpg():
+    global last_frame
+    frame = last_frame
+    if frame is None:
+        try: frame = grab_frame()
+        except Exception: return ("", 204)
+    annotated = draw_annotations(frame, last_summary["detections"])
+    ok, buf = cv2.imencode(".jpg", annotated)
     if not ok: return ("", 204)
     return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
 
